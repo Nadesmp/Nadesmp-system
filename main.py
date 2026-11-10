@@ -294,7 +294,16 @@ async def oauth_callback(request: web.Request):
 
         access_token = token.get("access_token")
         if not access_token:
-            return web.Response(text="Discord did not return an access token.", status=502)
+            log.error("OAuth token response did not contain an access_token: %s", json.dumps(token)[:1000])
+            return web.Response(text="Discord did not return an access token. Please contact the server team.", status=502)
+
+        granted_scopes = set(str(token.get("scope", "")).split())
+        if "guilds.join" not in granted_scopes:
+            log.error("OAuth token is missing guilds.join scope. Granted scopes: %s", sorted(granted_scopes))
+            return web.Response(
+                text="Discord did not grant the permission required to join NadeSMP. Please restart verification and approve all requested permissions.",
+                status=403
+            )
 
         user_headers = {"Authorization": f"Bearer {access_token}"}
         async with session.get("https://discord.com/api/v10/users/@me", headers=user_headers) as response:
@@ -315,8 +324,32 @@ async def oauth_callback(request: web.Request):
         ) as response:
             if response.status not in (201, 204):
                 details = await response.text()
-                log.warning("Discord guild join failed (HTTP %s): %s", response.status, details[:500])
-                return web.Response(text="NadeSMP could not add your account. Please contact the server team.", status=502)
+                try:
+                    error_data = json.loads(details)
+                except (TypeError, json.JSONDecodeError):
+                    error_data = {}
+                discord_code = error_data.get("code")
+                discord_message = error_data.get("message", details[:500])
+                log.error(
+                    "Discord guild join failed: http_status=%s discord_code=%s discord_message=%s guild_id=%s user_id=%s. "
+                    "Check that the bot is in this guild, the OAuth app matches the bot application, "
+                    "the token has guilds.join scope, and the bot token is valid.",
+                    response.status, discord_code, discord_message, VERIFY_GUILD_ID, user.get("id")
+                )
+
+                if response.status == 400:
+                    user_message = "Discord rejected the verification request. Please restart verification and approve the requested permissions. If this continues, contact the server team."
+                elif response.status == 401:
+                    user_message = "The NadeSMP bot authorization is invalid. Please contact the server team."
+                elif response.status == 403:
+                    user_message = "The NadeSMP bot does not have access to the server. Please contact the server team."
+                elif response.status == 404:
+                    user_message = "The configured NadeSMP server could not be found by the bot. Please contact the server team."
+                elif response.status == 429:
+                    user_message = "Discord is temporarily rate-limiting verification. Please wait a moment and try again."
+                else:
+                    user_message = "Discord could not add your account to NadeSMP. Please try again later or contact the server team."
+                return web.Response(text=user_message, status=502)
 
     guild = bot.get_guild(VERIFY_GUILD_ID)
     if guild is None:
