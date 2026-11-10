@@ -69,6 +69,7 @@ class NadeBot(commands.Bot):
         init_db()
         self.add_view(TicketPanelView())
         self.add_view(VerifyPanelView())
+        self.add_view(TicketCloseView())
         await self.tree.sync()
         log.info("Slash commands synced.")
 
