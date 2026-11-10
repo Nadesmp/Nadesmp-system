@@ -4,6 +4,7 @@ import time
 import secrets
 import sqlite3
 import logging
+import asyncio
 from pathlib import Path
 from urllib.parse import urlencode
 
@@ -13,6 +14,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 from dotenv import load_dotenv
+from cryptography.fernet import Fernet, InvalidToken
 
 load_dotenv()
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
@@ -25,6 +27,11 @@ REDIRECT_URI = os.getenv("REDIRECT_URI", "https://nadesmp-verify.up.railway.app/
 VERIFY_GUILD_ID = int(os.getenv("VERIFY_GUILD_ID", "1539199898430476328"))
 DB_PATH = os.getenv("DATABASE_PATH", "data/bot.sqlite3")
 PORT = int(os.getenv("PORT", "8080"))
+OAUTH_TOKEN_ENCRYPTION_KEY = os.getenv("OAUTH_TOKEN_ENCRYPTION_KEY", "").strip()
+try:
+    TOKEN_CIPHER = Fernet(OAUTH_TOKEN_ENCRYPTION_KEY.encode()) if OAUTH_TOKEN_ENCRYPTION_KEY else None
+except (ValueError, TypeError):
+    TOKEN_CIPHER = None
 
 Path(DB_PATH).parent.mkdir(parents=True, exist_ok=True)
 
@@ -38,6 +45,12 @@ def init_db():
         con.execute("CREATE TABLE IF NOT EXISTS settings (guild_id TEXT NOT NULL, key TEXT NOT NULL, value TEXT, PRIMARY KEY(guild_id,key))")
         con.execute("CREATE TABLE IF NOT EXISTS oauth_states (state TEXT PRIMARY KEY, user_id TEXT NOT NULL, created INTEGER NOT NULL)")
         con.execute("CREATE TABLE IF NOT EXISTS ticket_owners (channel_id TEXT PRIMARY KEY, owner_id TEXT NOT NULL, ticket_type TEXT NOT NULL)")
+        con.execute("""CREATE TABLE IF NOT EXISTS oauth_members (
+            user_id TEXT PRIMARY KEY,
+            refresh_token TEXT NOT NULL,
+            created INTEGER NOT NULL,
+            updated INTEGER NOT NULL
+        )""")
 
 def get_setting(guild_id, key, default=None):
     with db() as con:
@@ -50,6 +63,26 @@ def set_setting(guild_id, key, value):
             con.execute("DELETE FROM settings WHERE guild_id=? AND key=?", (str(guild_id), key))
         else:
             con.execute("INSERT INTO settings(guild_id,key,value) VALUES(?,?,?) ON CONFLICT(guild_id,key) DO UPDATE SET value=excluded.value", (str(guild_id), key, str(value)))
+
+def encrypt_refresh_token(refresh_token: str) -> str:
+    if TOKEN_CIPHER is None:
+        raise RuntimeError("OAUTH_TOKEN_ENCRYPTION_KEY is not configured or invalid.")
+    return TOKEN_CIPHER.encrypt(refresh_token.encode()).decode()
+
+def decrypt_refresh_token(encrypted_token: str) -> str:
+    if TOKEN_CIPHER is None:
+        raise RuntimeError("OAUTH_TOKEN_ENCRYPTION_KEY is not configured or invalid.")
+    return TOKEN_CIPHER.decrypt(encrypted_token.encode()).decode()
+
+def save_oauth_member(user_id: str, refresh_token: str):
+    encrypted = encrypt_refresh_token(refresh_token)
+    now = int(time.time())
+    with db() as con:
+        con.execute(
+            """INSERT INTO oauth_members(user_id,refresh_token,created,updated) VALUES(?,?,?,?)
+            ON CONFLICT(user_id) DO UPDATE SET refresh_token=excluded.refresh_token, updated=excluded.updated""",
+            (str(user_id), encrypted, now, now)
+        )
 
 def is_admin(interaction: discord.Interaction):
     return bool(interaction.guild and interaction.user.guild_permissions.administrator)
@@ -166,7 +199,7 @@ class VerifyPanelView(discord.ui.View):
 
     @discord.ui.button(label="Join & Verify", style=discord.ButtonStyle.success, emoji="✅", custom_id="nadesmp:verify:start")
     async def verify(self, interaction: discord.Interaction, button: discord.ui.Button):
-        missing = [name for name, value in (("CLIENT_ID", CLIENT_ID), ("CLIENT_SECRET", CLIENT_SECRET), ("REDIRECT_URI", REDIRECT_URI)) if not value]
+        missing = [name for name, value in (("CLIENT_ID", CLIENT_ID), ("CLIENT_SECRET", CLIENT_SECRET), ("REDIRECT_URI", REDIRECT_URI), ("OAUTH_TOKEN_ENCRYPTION_KEY", TOKEN_CIPHER)) if not value]
         if missing:
             return await interaction.response.send_message(
                 "Verification setup is incomplete. Missing Railway variable(s): " + ", ".join(missing),
@@ -217,30 +250,130 @@ async def verify_panel_send(interaction: discord.Interaction):
     await interaction.channel.send(embed=embed, view=VerifyPanelView())
     await interaction.response.send_message("Verification panel sent.", ephemeral=True)
 
+@bot.tree.command(name="pull", description="Add all users who previously authorized NadeSMP and are not in the server.")
+@app_commands.default_permissions(administrator=True)
+async def pull_users(interaction: discord.Interaction):
+    if not await admin_check(interaction): return
+    if not interaction.guild or interaction.guild.id != VERIFY_GUILD_ID:
+        return await interaction.response.send_message("This command can only be used in the configured NadeSMP server.", ephemeral=True)
+    if TOKEN_CIPHER is None:
+        return await interaction.response.send_message("Secure OAuth token storage is not configured. Set OAUTH_TOKEN_ENCRYPTION_KEY in Railway Variables first.", ephemeral=True)
+    await interaction.response.defer(ephemeral=True, thinking=True)
+
+    with db() as con:
+        rows = con.execute("SELECT user_id, refresh_token FROM oauth_members ORDER BY created ASC").fetchall()
+
+    if not rows:
+        return await interaction.followup.send(
+            "No saved OAuth authorizations found. Members must complete website verification once after this update so their authorization can be stored.",
+            ephemeral=True
+        )
+
+    added = 0
+    already_present = 0
+    failed = 0
+    expired = 0
+    timeout = aiohttp.ClientTimeout(total=25)
+    async with aiohttp.ClientSession(timeout=timeout) as session:
+        for row in rows:
+            user_id = str(row["user_id"])
+            try:
+                old_refresh_token = decrypt_refresh_token(row["refresh_token"])
+                async with session.post(
+                    "https://discord.com/api/oauth2/token",
+                    data={
+                        "client_id": CLIENT_ID,
+                        "client_secret": CLIENT_SECRET,
+                        "grant_type": "refresh_token",
+                        "refresh_token": old_refresh_token,
+                    },
+                    headers={"Content-Type": "application/x-www-form-urlencoded"}
+                ) as token_response:
+                    token_data = await token_response.json()
+                    if token_response.status != 200:
+                        if token_response.status in (400, 401):
+                            with db() as con:
+                                con.execute("DELETE FROM oauth_members WHERE user_id=?", (user_id,))
+                            expired += 1
+                        else:
+                            failed += 1
+                        log.warning("OAuth refresh failed for user %s: HTTP %s, %s", user_id, token_response.status, str(token_data)[:300])
+                        continue
+
+                access_token = token_data.get("access_token")
+                new_refresh_token = token_data.get("refresh_token")
+                if not access_token or not new_refresh_token:
+                    failed += 1
+                    log.error("OAuth refresh response incomplete for user %s", user_id)
+                    continue
+
+                async with session.put(
+                    f"https://discord.com/api/v10/guilds/{VERIFY_GUILD_ID}/members/{user_id}",
+                    json={"access_token": access_token},
+                    headers={"Authorization": f"Bot {TOKEN}"}
+                ) as join_response:
+                    if join_response.status == 201:
+                        added += 1
+                    elif join_response.status == 204:
+                        already_present += 1
+                    else:
+                        failed += 1
+                        detail = await join_response.text()
+                        log.warning("Pull join failed for user %s: HTTP %s %s", user_id, join_response.status, detail[:300])
+                        # Persist the rotated refresh token even if the guild join temporarily failed.
+                        save_oauth_member(user_id, new_refresh_token)
+                        continue
+
+                save_oauth_member(user_id, new_refresh_token)
+                await asyncio.sleep(0.25)
+            except InvalidToken:
+                failed += 1
+                log.exception("Could not decrypt stored OAuth token for user %s; check OAUTH_TOKEN_ENCRYPTION_KEY", user_id)
+            except (aiohttp.ClientError, asyncio.TimeoutError):
+                failed += 1
+                log.exception("Network error while pulling user %s", user_id)
+            except Exception:
+                failed += 1
+                log.exception("Unexpected error while pulling user %s", user_id)
+
+    await interaction.followup.send(
+        f"Pull finished. Added: **{added}** · Already in server: **{already_present}** · Expired authorizations: **{expired}** · Failed: **{failed}**",
+        ephemeral=True
+    )
+
+
 @bot.tree.command(name="welcome-system", description="Configure the welcome message.")
 @app_commands.default_permissions(administrator=True)
-@app_commands.describe(channel="Channel for welcome messages", message="Message; placeholders: {user}, {username}, {server}", required_role="Only welcome members who have this role (optional)")
-async def welcome_system(interaction: discord.Interaction, channel: discord.TextChannel, message: str, required_role: discord.Role = None):
+@app_commands.describe(channel="Channel for welcome messages", message="Message; placeholders: {user}, {username}, {server}", welcome_role="Role automatically given to new members (optional)")
+async def welcome_system(interaction: discord.Interaction, channel: discord.TextChannel, message: str, welcome_role: discord.Role = None):
     if not await admin_check(interaction): return
     set_setting(interaction.guild.id, "welcome_channel", channel.id)
     set_setting(interaction.guild.id, "welcome_message", message)
-    set_setting(interaction.guild.id, "welcome_required_role", required_role.id if required_role else None)
-    await interaction.response.send_message("Welcome system saved.", ephemeral=True)
+    set_setting(interaction.guild.id, "welcome_role", welcome_role.id if welcome_role else None)
+    await interaction.response.send_message("Welcome system saved. The selected role will be given to each new member.", ephemeral=True)
 
 @bot.event
 async def on_member_join(member: discord.Member):
     channel_id = get_setting(member.guild.id, "welcome_channel")
     message = get_setting(member.guild.id, "welcome_message", "Welcome {user} to {server}!")
-    required = get_setting(member.guild.id, "welcome_required_role")
     if not channel_id: return
-    if required and not any(role.id == int(required) for role in member.roles): return
+    role_id = get_setting(member.guild.id, "welcome_role")
+    if role_id:
+        role = member.guild.get_role(int(role_id))
+        if role:
+            try:
+                await member.add_roles(role, reason="NadeSMP welcome role")
+            except discord.Forbidden:
+                log.exception("Could not assign welcome role %s in guild %s", role_id, member.guild.id)
+            except discord.HTTPException:
+                log.exception("Welcome role assignment failed for member %s", member.id)
     channel = member.guild.get_channel(int(channel_id))
     if isinstance(channel, discord.TextChannel):
         text = message.replace("{user}", member.mention).replace("{username}", member.name).replace("{server}", member.guild.name)
         await channel.send(text)
 
 async def oauth_start(request: web.Request):
-    missing = [name for name, value in (("CLIENT_ID", CLIENT_ID), ("CLIENT_SECRET", CLIENT_SECRET), ("REDIRECT_URI", REDIRECT_URI)) if not value]
+    missing = [name for name, value in (("CLIENT_ID", CLIENT_ID), ("CLIENT_SECRET", CLIENT_SECRET), ("REDIRECT_URI", REDIRECT_URI), ("OAUTH_TOKEN_ENCRYPTION_KEY", TOKEN_CIPHER)) if not value]
     if missing:
         log.error("OAuth setup incomplete; missing Railway variable(s): %s", ", ".join(missing))
         return web.Response(
@@ -255,6 +388,7 @@ async def oauth_start(request: web.Request):
         "redirect_uri": REDIRECT_URI,
         "response_type": "code",
         "scope": "identify guilds.join",
+        "prompt": "consent",
         "state": state,
     }
     raise web.HTTPFound("https://discord.com/oauth2/authorize?" + urlencode(params))
@@ -378,6 +512,16 @@ async def oauth_callback(request: web.Request):
                     user_message = "Discord could not add your account to NadeSMP. Please try again later or contact the server team."
                 return web.Response(text=user_message, status=502)
 
+        refresh_token = token.get("refresh_token")
+        if not refresh_token:
+            log.error("OAuth authorization succeeded but Discord did not return a refresh token for user %s", user["id"])
+            return web.Response(text="You joined NadeSMP, but persistent access could not be saved. Please contact the server team.", status=502)
+        try:
+            save_oauth_member(str(user["id"]), refresh_token)
+        except Exception:
+            log.exception("Could not securely store OAuth refresh token for user %s", user["id"])
+            return web.Response(text="You joined NadeSMP, but the server could not save your authorization for future joining. Please contact staff.", status=503)
+
     try:
         member = await guild.fetch_member(int(user["id"]))
     except discord.NotFound:
@@ -458,7 +602,7 @@ async def start_web():
 async def main():
     if not TOKEN:
         raise RuntimeError("DISCORD_TOKEN is missing.")
-    missing_oauth = [name for name, value in (("CLIENT_ID", CLIENT_ID), ("CLIENT_SECRET", CLIENT_SECRET), ("REDIRECT_URI", REDIRECT_URI)) if not value]
+    missing_oauth = [name for name, value in (("CLIENT_ID", CLIENT_ID), ("CLIENT_SECRET", CLIENT_SECRET), ("REDIRECT_URI", REDIRECT_URI), ("OAUTH_TOKEN_ENCRYPTION_KEY", TOKEN_CIPHER)) if not value]
     if missing_oauth:
         log.warning("OAuth variables are incomplete; missing: %s", ", ".join(missing_oauth))
     else:
@@ -470,5 +614,4 @@ async def main():
         await runner.cleanup()
 
 if __name__ == "__main__":
-    import asyncio
     asyncio.run(main())
