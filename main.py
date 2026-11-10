@@ -175,7 +175,7 @@ class VerifyPanelView(discord.ui.View):
             "client_id": CLIENT_ID,
             "redirect_uri": REDIRECT_URI,
             "response_type": "code",
-            "scope": "identify guilds",
+            "scope": "identify guilds.join",
             "state": state,
         }
         url = "https://discord.com/oauth2/authorize?" + urlencode(params)
@@ -235,19 +235,35 @@ async def on_member_join(member: discord.Member):
         text = message.replace("{user}", member.mention).replace("{username}", member.name).replace("{server}", member.guild.name)
         await channel.send(text)
 
+async def oauth_start(request: web.Request):
+    if not CLIENT_ID or not CLIENT_SECRET or not REDIRECT_URI:
+        return web.Response(text="Verification is not configured.", status=503)
+    state = secrets.token_urlsafe(32)
+    with db() as con:
+        con.execute("INSERT INTO oauth_states(state,user_id,created) VALUES(?,?,?)", (state, "", int(time.time())))
+    params = {
+        "client_id": CLIENT_ID,
+        "redirect_uri": REDIRECT_URI,
+        "response_type": "code",
+        "scope": "identify guilds.join",
+        "state": state,
+    }
+    raise web.HTTPFound("https://discord.com/oauth2/authorize?" + urlencode(params))
+
+
 async def oauth_callback(request: web.Request):
-    error = request.query.get("error")
-    if error:
-        return web.Response(text="Discord authorization was cancelled. You can close this page.", content_type="text/plain", status=400)
-    code = request.query.get("code")
-    state = request.query.get("state")
+    if request.query.get("error"):
+        return web.Response(text="Discord authorization was cancelled. You can close this page.", status=400)
+    code, state = request.query.get("code"), request.query.get("state")
     if not code or not state:
         return web.Response(text="Missing OAuth code or state.", status=400)
+
     with db() as con:
         row = con.execute("SELECT user_id,created FROM oauth_states WHERE state=?", (state,)).fetchone()
         con.execute("DELETE FROM oauth_states WHERE state=?", (state,))
-    if not row or int(time.time()) - row["created"] > 600:
-        return web.Response(text="This verification link is invalid or expired. Please try again in Discord.", status=400)
+    if not row or int(time.time()) - int(row["created"]) > 600:
+        return web.Response(text="This verification link is invalid or expired. Please start again.", status=400)
+
     token_data = {
         "client_id": CLIENT_ID,
         "client_secret": CLIENT_SECRET,
@@ -255,46 +271,88 @@ async def oauth_callback(request: web.Request):
         "code": code,
         "redirect_uri": REDIRECT_URI,
     }
-    async with aiohttp.ClientSession() as session:
-        async with session.post("https://discord.com/api/oauth2/token", data=token_data, headers={"Content-Type": "application/x-www-form-urlencoded"}) as response:
+    timeout = aiohttp.ClientTimeout(total=20)
+    async with aiohttp.ClientSession(timeout=timeout) as session:
+        async with session.post(
+            "https://discord.com/api/oauth2/token",
+            data=token_data,
+            headers={"Content-Type": "application/x-www-form-urlencoded"}
+        ) as response:
             token = await response.json()
             if response.status != 200:
-                log.warning("OAuth token exchange failed: %s", token)
-                return web.Response(text="Discord verification failed. Please try again.", status=502)
-        headers = {"Authorization": f"Bearer {token['access_token']}"}
-        async with session.get("https://discord.com/api/users/@me", headers=headers) as response:
+                log.warning("OAuth token exchange failed with status %s", response.status)
+                return web.Response(text="Discord authorization failed. Please try again.", status=502)
+
+        access_token = token.get("access_token")
+        if not access_token:
+            return web.Response(text="Discord did not return an access token.", status=502)
+
+        user_headers = {"Authorization": f"Bearer {access_token}"}
+        async with session.get("https://discord.com/api/v10/users/@me", headers=user_headers) as response:
             user = await response.json()
-            if response.status != 200:
+            if response.status != 200 or not user.get("id"):
                 return web.Response(text="Could not read your Discord account.", status=502)
-        async with session.get("https://discord.com/api/users/@me/guilds", headers=headers) as response:
-            guilds = await response.json()
-            if response.status != 200:
-                return web.Response(text="Could not check your Discord servers.", status=502)
-    if str(row["user_id"]) != str(user.get("id")):
-        return web.Response(text="Please start verification from the same Discord account that opened the link.", status=403)
-    if not any(str(g.get("id")) == str(VERIFY_GUILD_ID) for g in guilds):
-        return web.Response(text="Your Discord account is not a member of the required NadeSMP server. Join the server and try again.", content_type="text/plain", status=403)
+
+        if row["user_id"] and str(row["user_id"]) != str(user["id"]):
+            return web.Response(text="Please use the same Discord account that started verification.", status=403)
+        if not TOKEN:
+            return web.Response(text="The server bot is not configured.", status=503)
+
+        join_url = f"https://discord.com/api/v10/guilds/{VERIFY_GUILD_ID}/members/{user['id']}"
+        async with session.put(
+            join_url,
+            json={"access_token": access_token},
+            headers={"Authorization": f"Bot {TOKEN}"}
+        ) as response:
+            if response.status not in (201, 204):
+                details = await response.text()
+                log.warning("Discord guild join failed (HTTP %s): %s", response.status, details[:500])
+                return web.Response(text="NadeSMP could not add your account. Please contact the server team.", status=502)
+
     guild = bot.get_guild(VERIFY_GUILD_ID)
     if guild is None:
-        return web.Response(text="The bot is not connected to the configured server.", status=503)
+        return web.Response(text="The bot is not connected to the configured NadeSMP server.", status=503)
     try:
         member = await guild.fetch_member(int(user["id"]))
     except discord.NotFound:
-        return web.Response(text="Discord membership could not be confirmed by the bot. Please contact staff.", status=403)
-    role_id = get_setting(guild.id, "verify_role")
-    if role_id:
-        role = guild.get_role(int(role_id))
-        if role:
-            await member.add_roles(role, reason="Discord OAuth membership verification")
-    extra_id = get_setting(guild.id, "extra_role")
-    if extra_id:
-        role = guild.get_role(int(extra_id))
-        if role: await member.add_roles(role, reason="Discord OAuth verification")
+        return web.Response(text="Discord added your account, but the bot could not find the server member yet. Please contact staff.", status=502)
+    except discord.HTTPException:
+        log.exception("Could not fetch newly joined member")
+        return web.Response(text="Could not finish verification. Please contact staff.", status=502)
+
+    roles_to_add = []
+    for role_id in (get_setting(guild.id, "verify_role"), get_setting(guild.id, "extra_role")):
+        if role_id:
+            role = guild.get_role(int(role_id))
+            if role and role not in member.roles:
+                roles_to_add.append(role)
     remove_id = get_setting(guild.id, "remove_role")
-    if remove_id:
-        role = guild.get_role(int(remove_id))
-        if role and role in member.roles: await member.remove_roles(role, reason="Discord OAuth verification")
-    return web.Response(text="Verification successful! You can return to Discord now.", content_type="text/plain")
+    role_to_remove = guild.get_role(int(remove_id)) if remove_id else None
+
+    try:
+        if roles_to_add:
+            await member.add_roles(*roles_to_add, reason="NadeSMP website OAuth verification")
+        if role_to_remove and role_to_remove in member.roles:
+            await member.remove_roles(role_to_remove, reason="NadeSMP website OAuth verification")
+    except discord.Forbidden:
+        log.exception("Bot lacks permission or role hierarchy for verification roles")
+        return web.Response(text="You joined NadeSMP, but the bot could not assign your roles. Please contact staff.", status=502)
+    except discord.HTTPException:
+        log.exception("Role assignment failed")
+        return web.Response(text="You joined NadeSMP, but role assignment failed. Please contact staff.", status=502)
+
+    return web.Response(
+        text="""<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>NadeSMP Verification</title><style>
+*{box-sizing:border-box}body{margin:0;min-height:100vh;display:grid;place-items:center;background:#10131d;color:#f4f6fb;font:16px Arial,sans-serif;padding:24px}
+main{max-width:480px;text-align:center;background:#171c29;border:1px solid #ffffff20;border-radius:18px;padding:42px 32px}
+.mark{margin:auto auto 22px;width:58px;height:58px;border-radius:18px;background:#a6e86b;color:#10131d;display:grid;place-items:center;font-size:30px;font-weight:bold}
+h1{margin:0 0 12px}p{color:#a4adbf;line-height:1.7}a{display:inline-block;margin-top:18px;padding:13px 18px;background:#a6e86b;color:#10131d;text-decoration:none;border-radius:8px;font-weight:bold}
+</style></head><body><main><div class="mark">✓</div><h1>You're in!</h1><p>Your Discord account has been added to NadeSMP and your verification roles have been processed. You can return to Discord now.</p><a href="https://discord.com/channels/1539199898430476328">Open Discord</a></main></body></html>""",
+        content_type="text/html"
+    )
+
 
 async def health(request):
     return web.json_response({"ok": True, "service": "NadeSMP Discord bot"})
@@ -319,6 +377,7 @@ async def website_script(request):
 
 async def start_web():
     app = web.Application()
+    app.router.add_get("/oauth/start", oauth_start)
     app.router.add_get("/oauth/callback", oauth_callback)
     app.router.add_get("/health", health)
     app.router.add_get("/", website_index)
