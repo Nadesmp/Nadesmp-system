@@ -164,7 +164,7 @@ class VerifyPanelView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
 
-    @discord.ui.button(label="Verify Account", style=discord.ButtonStyle.success, emoji="✓", custom_id="nadesmp:verify:start")
+    @discord.ui.button(label="Join & Verify", style=discord.ButtonStyle.success, emoji="✓", custom_id="nadesmp:verify:start")
     async def verify(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not CLIENT_ID or not REDIRECT_URI:
             return await interaction.response.send_message("Verification is not configured yet. Contact an administrator.", ephemeral=True)
@@ -209,7 +209,7 @@ async def panel_send(interaction: discord.Interaction):
 @app_commands.default_permissions(administrator=True)
 async def verify_panel_send(interaction: discord.Interaction):
     if not await admin_check(interaction): return
-    embed = discord.Embed(title="Account Verification", description="Click below to securely check whether your Discord account is a member of the NadeSMP server.", color=discord.Color.green())
+    embed = discord.Embed(title="Account Verification", description="Click below to securely join NadeSMP with Discord and receive your configured verification roles.", color=discord.Color.green())
     await interaction.channel.send(embed=embed, view=VerifyPanelView())
     await interaction.response.send_message("Verification panel sent.", ephemeral=True)
 
