@@ -299,10 +299,31 @@ async def oauth_callback(request: web.Request):
 async def health(request):
     return web.json_response({"ok": True, "service": "NadeSMP Discord bot"})
 
+async def website_index(request):
+    index_file = Path(__file__).resolve().parent / "website" / "index.html"
+    if not index_file.is_file():
+        return web.Response(text="NadeSMP website files are missing.", status=500)
+    return web.FileResponse(index_file)
+
+async def website_style(request):
+    asset = Path(__file__).resolve().parent / "website" / "style.css"
+    if not asset.is_file():
+        return web.Response(text="Website stylesheet not found.", status=404)
+    return web.FileResponse(asset)
+
+async def website_script(request):
+    asset = Path(__file__).resolve().parent / "website" / "script.js"
+    if not asset.is_file():
+        return web.Response(text="Website script not found.", status=404)
+    return web.FileResponse(asset)
+
 async def start_web():
     app = web.Application()
     app.router.add_get("/oauth/callback", oauth_callback)
     app.router.add_get("/health", health)
+    app.router.add_get("/", website_index)
+    app.router.add_get("/style.css", website_style)
+    app.router.add_get("/script.js", website_script)
     runner = web.AppRunner(app)
     await runner.setup()
     site = web.TCPSite(runner, "0.0.0.0", PORT)
