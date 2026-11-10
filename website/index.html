@@ -4,32 +4,33 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="theme-color" content="#10131d">
-  <meta name="description" content="NadeSMP — Minecraft community and server information.">
-  <title>NadeSMP — Official Website</title>
-  <link rel="stylesheet" href="style.css">
+  <meta name="description" content="Securely join and verify your Discord account for NadeSMP.">
+  <title>NadeSMP — Discord Verification</title>
+  <link rel="stylesheet" href="/style.css">
 </head>
 <body>
+  <div class="ambient ambient-one"></div><div class="ambient ambient-two"></div>
   <header class="nav wrap">
-    <a class="brand" href="#"><span class="brand-mark">N</span><span>Nade<span>SMP</span></span></a>
-    <nav><a href="#about">About</a><a href="#status">Community</a><a class="nav-cta" href="#join">Get Started</a></nav>
+    <a class="brand" href="/"><span class="brand-mark">N</span><span>Nade<span class="brand-accent">SMP</span></span></a>
+    <span class="secure"><i></i> OFFICIAL VERIFICATION</span>
   </header>
-  <main>
-    <section class="hero wrap">
-      <div class="eyebrow"><span class="dot"></span> OFFICIAL NADE SMP WEBSITE</div>
-      <h1>Your next<br><span>adventure starts here.</span></h1>
-      <p class="lead">A place to build, explore and play together. Get the latest information and join the NadeSMP community.</p>
-      <div class="actions"><a class="button primary" href="#join">Explore NadeSMP <span>↗</span></a><a class="button secondary" href="#about">Learn more</a></div>
-      <div class="hero-orb orb-one"></div><div class="hero-orb orb-two"></div>
-      <div class="hero-card"><div class="card-top"><span>NADE SMP</span><span class="live"><i></i> COMMUNITY</span></div><div class="pixel">N</div><div class="card-bottom"><strong>Build. Explore. Belong.</strong><small>YOUR WORLD. YOUR STORY.</small></div></div>
+  <main class="main wrap">
+    <section class="verify-card">
+      <div class="server-icon">N</div>
+      <div class="eyebrow">NADE SMP • DISCORD</div>
+      <h1>One step away<br><span>from joining.</span></h1>
+      <p class="description">Connect your Discord account to join the official NadeSMP community. Discord will ask you to approve the connection before anything happens.</p>
+      <a class="button primary" href="/oauth/start">Continue with Discord <span>↗</span></a>
+      <div class="divider"></div>
+      <div class="steps">
+        <div><b>01</b><span>Authorize securely with Discord</span></div>
+        <div><b>02</b><span>Your account joins the NadeSMP server</span></div>
+        <div><b>03</b><span>Your configured roles are assigned</span></div>
+      </div>
+      <p class="fine-print">We only request the Discord access needed to identify your account and add it to NadeSMP. Your password is never shared with this website.</p>
     </section>
-    <section class="section wrap" id="about">
-      <div class="section-label">01 / THE SERVER</div><h2>More than just<br>a Minecraft server.</h2>
-      <p class="section-copy">NadeSMP is built around a shared world and a community of players. Check the official Discord for announcements, rules and server access details.</p>
-      <div class="feature-grid"><article><b>01</b><h3>Play together</h3><p>Meet other players and create your own place in the world.</p></article><article><b>02</b><h3>Make progress</h3><p>Build, collect resources and shape the world around you.</p></article><article><b>03</b><h3>Stay informed</h3><p>Find updates and important information through the community.</p></article></div>
-    </section>
-    <section class="join wrap" id="join"><div><div class="section-label">02 / GET STARTED</div><h2>Ready to join<br>the community?</h2><p>Visit the official Discord server for the latest invite and connection information.</p></div><a class="button primary" href="#" id="discord-link">Discord link coming soon <span>↗</span></a></section>
-    <footer class="footer wrap"><a class="brand" href="#"><span class="brand-mark">N</span><span>Nade<span>SMP</span></span></a><small>© <span id="year"></span> NadeSMP. All rights reserved.</small></footer>
+    <footer class="footer"><span>© <span id="year"></span> NadeSMP</span><span>Secure Discord OAuth2</span></footer>
   </main>
-  <script src="script.js"></script>
+  <script src="/script.js"></script>
 </body>
 </html>
