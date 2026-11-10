@@ -1,0 +1,1 @@
+.env\n.env.*\n!.env.example\n__pycache__/\n*.py[cod]\ndata/\n*.sqlite3\n.venv/\nvenv/\n
