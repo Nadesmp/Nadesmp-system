@@ -164,7 +164,7 @@ class VerifyPanelView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
 
-    @discord.ui.button(label="Join & Verify", style=discord.ButtonStyle.success, emoji="✓", custom_id="nadesmp:verify:start")
+    @discord.ui.button(label="Join & Verify", style=discord.ButtonStyle.success, emoji="✅", custom_id="nadesmp:verify:start")
     async def verify(self, interaction: discord.Interaction, button: discord.ui.Button):
         missing = [name for name, value in (("CLIENT_ID", CLIENT_ID), ("CLIENT_SECRET", CLIENT_SECRET), ("REDIRECT_URI", REDIRECT_URI)) if not value]
         if missing:
@@ -316,6 +316,33 @@ async def oauth_callback(request: web.Request):
         if not TOKEN:
             return web.Response(text="The server bot is not configured.", status=503)
 
+        guild = bot.get_guild(VERIFY_GUILD_ID)
+        if guild is None:
+            log.error(
+                "Configured verification guild %s is not in the bot's connected guild list. "
+                "The bot must be invited to that exact server and VERIFY_GUILD_ID must be its server ID. "
+                "Bot user=%s application_id=%s configured_client_id=%s connected_guild_ids=%s",
+                VERIFY_GUILD_ID,
+                bot.user,
+                getattr(bot, "application_id", None),
+                CLIENT_ID,
+                [g.id for g in bot.guilds]
+            )
+            return web.Response(
+                text="The NadeSMP bot is not connected to the configured server. Please contact the server team.",
+                status=503
+            )
+
+        if str(getattr(bot, "application_id", "")) != str(CLIENT_ID):
+            log.error(
+                "Discord application mismatch: bot application_id=%s but CLIENT_ID=%s",
+                getattr(bot, "application_id", None), CLIENT_ID
+            )
+            return web.Response(
+                text="The verification application is misconfigured. Please contact the server team.",
+                status=503
+            )
+
         join_url = f"https://discord.com/api/v10/guilds/{VERIFY_GUILD_ID}/members/{user['id']}"
         async with session.put(
             join_url,
@@ -351,9 +378,6 @@ async def oauth_callback(request: web.Request):
                     user_message = "Discord could not add your account to NadeSMP. Please try again later or contact the server team."
                 return web.Response(text=user_message, status=502)
 
-    guild = bot.get_guild(VERIFY_GUILD_ID)
-    if guild is None:
-        return web.Response(text="The bot is not connected to the configured NadeSMP server.", status=503)
     try:
         member = await guild.fetch_member(int(user["id"]))
     except discord.NotFound:
