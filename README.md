@@ -29,9 +29,10 @@ REDIRECT_URI=https://YOUR-RAILWAY-DOMAIN.up.railway.app/oauth/callback
 VERIFY_GUILD_ID=1539199898430476328
 DATABASE_PATH=/app/data/bot.sqlite3
 LOG_LEVEL=INFO
+OAUTH_TOKEN_ENCRYPTION_KEY=GENERATE_A_FERNET_KEY
 ```
 
-Do not commit your real `.env`, bot token or OAuth2 client secret.
+Generate `OAUTH_TOKEN_ENCRYPTION_KEY` once with `python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"` and save the result as a Railway Variable. Keep the same key permanently: changing it makes previously stored authorizations unreadable. Do not commit your real `.env`, encryption key, bot token or OAuth2 client secret.
 
 ## Discord commands
 
@@ -40,13 +41,14 @@ All commands require Administrator permission:
 - `/setup` — configure team role, ticket category, ticket log, verification role and optional role changes
 - `/panel-send` — post the ticket panel
 - `/verify-panel-send` — post the OAuth2 verification panel
-- `/welcome-system` — configure the welcome channel and message
+- `/welcome-system` — configure the welcome channel, message and optional role automatically assigned to new members
+- `/pull` — add all users whose OAuth2 refresh authorization has been securely saved and assign their verification roles
 
 Welcome message placeholders: `{user}`, `{username}`, `{server}`.
 
 ## OAuth2 behavior
 
-The website route `/oauth/start` requests `identify` and `guilds.join`. After the user approves the Discord consent screen, the callback exchanges the authorization code and uses Discord's Add Guild Member endpoint to add the user to guild `1539199898430476328`. The bot then assigns the configured verification and extra roles and optionally removes the configured role. The Discord bot must be in the target server and have `Create Invite`; role assignment also requires `Manage Roles` and a role hierarchy that allows the bot to manage those roles. The `/verify-panel-send` button uses the same OAuth flow but binds the authorization to the Discord account that clicked it.
+The website route `/oauth/start` requests `identify` and `guilds.join`. After the user approves the Discord consent screen, the callback exchanges the authorization code and uses Discord's Add Guild Member endpoint to add the user to guild `1539199898430476328`. The bot then assigns the configured verification and extra roles and optionally removes the configured role. The Discord bot must be in the target server and have `Create Invite`; role assignment also requires `Manage Roles` and a role hierarchy that allows the bot to manage those roles. After a successful OAuth2 join, the app stores the user's refresh token encrypted with `OAUTH_TOKEN_ENCRYPTION_KEY`. The administrator can run `/pull` to re-add users who previously authorized the app but are not currently in the guild. Users who completed verification before persistent token storage was deployed must authorize once again before they can be included in `/pull`. The `/verify-panel-send` button uses the same OAuth flow but binds the authorization to the Discord account that clicked it.
 
 ## Website
 
