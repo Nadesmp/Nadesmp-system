@@ -19,9 +19,9 @@ logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 log = logging.getLogger("nadesmp")
 
 TOKEN = os.getenv("DISCORD_TOKEN", "")
-CLIENT_ID = os.getenv("CLIENT_ID", "")
-CLIENT_SECRET = os.getenv("CLIENT_SECRET", "")
-REDIRECT_URI = os.getenv("REDIRECT_URI", "")
+CLIENT_ID = os.getenv("CLIENT_ID", "1569717953145086012").strip()
+CLIENT_SECRET = os.getenv("CLIENT_SECRET", "").strip()
+REDIRECT_URI = os.getenv("REDIRECT_URI", "https://nadesmp-verify.up.railway.app/oauth/callback").strip()
 VERIFY_GUILD_ID = int(os.getenv("VERIFY_GUILD_ID", "1539199898430476328"))
 DB_PATH = os.getenv("DATABASE_PATH", "data/bot.sqlite3")
 PORT = int(os.getenv("PORT", "8080"))
@@ -166,8 +166,12 @@ class VerifyPanelView(discord.ui.View):
 
     @discord.ui.button(label="Join & Verify", style=discord.ButtonStyle.success, emoji="✓", custom_id="nadesmp:verify:start")
     async def verify(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not CLIENT_ID or not REDIRECT_URI:
-            return await interaction.response.send_message("Verification is not configured yet. Contact an administrator.", ephemeral=True)
+        missing = [name for name, value in (("CLIENT_ID", CLIENT_ID), ("CLIENT_SECRET", CLIENT_SECRET), ("REDIRECT_URI", REDIRECT_URI)) if not value]
+        if missing:
+            return await interaction.response.send_message(
+                "Verification setup is incomplete. Missing Railway variable(s): " + ", ".join(missing),
+                ephemeral=True
+            )
         state = secrets.token_urlsafe(32)
         with db() as con:
             con.execute("INSERT INTO oauth_states(state,user_id,created) VALUES(?,?,?)", (state, str(interaction.user.id), int(time.time())))
@@ -236,8 +240,13 @@ async def on_member_join(member: discord.Member):
         await channel.send(text)
 
 async def oauth_start(request: web.Request):
-    if not CLIENT_ID or not CLIENT_SECRET or not REDIRECT_URI:
-        return web.Response(text="Verification is not configured.", status=503)
+    missing = [name for name, value in (("CLIENT_ID", CLIENT_ID), ("CLIENT_SECRET", CLIENT_SECRET), ("REDIRECT_URI", REDIRECT_URI)) if not value]
+    if missing:
+        log.error("OAuth setup incomplete; missing Railway variable(s): %s", ", ".join(missing))
+        return web.Response(
+            text="Verification setup is incomplete. Please ask the administrator to set these Railway variable(s): " + ", ".join(missing),
+            status=503
+        )
     state = secrets.token_urlsafe(32)
     with db() as con:
         con.execute("INSERT INTO oauth_states(state,user_id,created) VALUES(?,?,?)", (state, "", int(time.time())))
@@ -392,8 +401,11 @@ async def start_web():
 async def main():
     if not TOKEN:
         raise RuntimeError("DISCORD_TOKEN is missing.")
-    if not CLIENT_ID or not CLIENT_SECRET or not REDIRECT_URI:
-        log.warning("OAuth variables are incomplete; verification will not work until configured.")
+    missing_oauth = [name for name, value in (("CLIENT_ID", CLIENT_ID), ("CLIENT_SECRET", CLIENT_SECRET), ("REDIRECT_URI", REDIRECT_URI)) if not value]
+    if missing_oauth:
+        log.warning("OAuth variables are incomplete; missing: %s", ", ".join(missing_oauth))
+    else:
+        log.info("OAuth2 configuration loaded.")
     runner = await start_web()
     try:
         await bot.start(TOKEN)
