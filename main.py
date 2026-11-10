@@ -325,6 +325,32 @@ async def pull_users(interaction: discord.Interaction):
                         continue
 
                 save_oauth_member(user_id, new_refresh_token)
+
+                # Make pulled members fully verified, not just present in the guild.
+                try:
+                    member = await interaction.guild.fetch_member(int(user_id))
+                    roles_to_add = []
+                    for role_id in (
+                        get_setting(interaction.guild.id, "verify_role"),
+                        get_setting(interaction.guild.id, "extra_role")
+                    ):
+                        if role_id:
+                            role = interaction.guild.get_role(int(role_id))
+                            if role and role not in member.roles:
+                                roles_to_add.append(role)
+                    if roles_to_add:
+                        await member.add_roles(*roles_to_add, reason="NadeSMP authorized member pull")
+                    remove_id = get_setting(interaction.guild.id, "remove_role")
+                    role_to_remove = interaction.guild.get_role(int(remove_id)) if remove_id else None
+                    if role_to_remove and role_to_remove in member.roles:
+                        await member.remove_roles(role_to_remove, reason="NadeSMP authorized member pull")
+                except discord.Forbidden:
+                    log.exception("Pulled user %s joined, but verification roles could not be assigned", user_id)
+                    failed += 1
+                except discord.HTTPException:
+                    log.exception("Could not apply verification roles to pulled user %s", user_id)
+                    failed += 1
+
                 await asyncio.sleep(0.25)
             except InvalidToken:
                 failed += 1
